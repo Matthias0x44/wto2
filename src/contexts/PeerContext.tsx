@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect, ReactNode, useCallback } from 'react';
+import React, { createContext, useContext, useState, useEffect, ReactNode, useCallback, useRef } from 'react';
 import Peer from 'simple-peer';
 import { v4 as uuidv4 } from 'uuid';
 import { 
@@ -51,6 +51,25 @@ export const PeerProvider: React.FC<PeerProviderProps> = ({ children }) => {
   const [lobbyState, setLobbyState] = useState<LobbyState | null>(null);
   const [gameState, setGameState] = useState<GameState | null>(null);
   const [lobbyError, setLobbyError] = useState<string | null>(null);
+  
+  // Refs to track and clean up intervals
+  const heartbeatIntervals = useRef<Map<string, NodeJS.Timeout>>(new Map());
+  const lobbyCheckIntervals = useRef<Map<string, NodeJS.Timeout>>(new Map());
+
+  // Clean up intervals when component unmounts
+  useEffect(() => {
+    return () => {
+      // Clear all heartbeat intervals
+      heartbeatIntervals.current.forEach((intervalId) => {
+        clearInterval(intervalId);
+      });
+      
+      // Clear all lobby check intervals
+      lobbyCheckIntervals.current.forEach((intervalId) => {
+        clearInterval(intervalId);
+      });
+    };
+  }, []);
 
   // Initialize a new game state
   const initializeGameState = (players: Record<string, Player>): GameState => {
@@ -124,7 +143,50 @@ export const PeerProvider: React.FC<PeerProviderProps> = ({ children }) => {
       gameStarted: false
     };
     
+    // Store in localStorage with a timestamp to prevent conflicts
+    const storageKey = `lobby-${lobbyId}`;
+    localStorage.setItem(storageKey, JSON.stringify({
+      lobbyState: newLobbyState,
+      createdAt: Date.now()
+    }));
+    
     setLobbyState(newLobbyState);
+    
+    // Set up a heartbeat to keep this lobby alive and maintain host status
+    const heartbeatId = setInterval(() => {
+      const existingData = localStorage.getItem(storageKey);
+      if (existingData) {
+        const data = JSON.parse(existingData);
+        
+        // Ensure we remain the host by writing back our state
+        if (data.lobbyState) {
+          // Preserve other players but make sure we're the host
+          const updatedLobbyState = { 
+            ...data.lobbyState,
+            host: myId
+          };
+          
+          // Make sure our player data is preserved
+          if (lobbyState && lobbyState.players[myId]) {
+            updatedLobbyState.players[myId] = lobbyState.players[myId];
+          }
+          
+          // Write back to localStorage
+          data.lobbyState = updatedLobbyState;
+          data.lastHeartbeat = Date.now();
+          localStorage.setItem(storageKey, JSON.stringify(data));
+          
+          // Update our state if needed
+          if (JSON.stringify(lobbyState) !== JSON.stringify(updatedLobbyState)) {
+            setLobbyState(updatedLobbyState);
+          }
+        }
+      }
+    }, 2000); // Every 2 seconds
+    
+    // Store the interval ID for cleanup
+    heartbeatIntervals.current.set(lobbyId, heartbeatId);
+    
     return lobbyId;
   };
 
@@ -134,102 +196,116 @@ export const PeerProvider: React.FC<PeerProviderProps> = ({ children }) => {
     setLobbyError(null);
     
     try {
-      // For testing in local tabs, we'll use localStorage to simulate signaling
       const storageKey = `lobby-${lobbyId}`;
       const existingData = localStorage.getItem(storageKey);
       
       if (!existingData) {
-        // First player in this lobby on this browser
-        const player: Player = {
-          id: myId,
-          name: playerName,
-          isReady: false,
-          color: FACTION_INFO[Faction.HUMANS].baseColor, // Default to Humans
-          faction: Faction.HUMANS,
-          gold: 0,
-          units: 0,
-          goldRate: 1, // Base rate
-          unitRate: 0,
-          tiles: []
-        };
-        
-        const newLobbyState: LobbyState = {
-          lobbyId,
-          players: { [myId]: player },
-          host: myId,
-          gameStarted: false
-        };
-        
-        localStorage.setItem(storageKey, JSON.stringify({
-          lobbyState: newLobbyState,
-          peerOffers: {}
-        }));
-        
-        setLobbyState(newLobbyState);
-      } else {
-        // Other players exist in this lobby
-        const lobbyData = JSON.parse(existingData);
-        const existingLobbyState = lobbyData.lobbyState as LobbyState;
-        
-        if (Object.keys(existingLobbyState.players).length >= 3) {
-          setLobbyError('Lobby is full');
-          return;
-        }
-        
-        // Find an available faction
-        const usedFactions = Object.values(existingLobbyState.players).map(p => p.faction);
-        const availableFactions = Object.values(Faction).filter(f => !usedFactions.includes(f));
-        const selectedFaction = availableFactions.length > 0 ? availableFactions[0] : Faction.HUMANS;
-
-        // Find an available color
-        const usedColors = Object.values(existingLobbyState.players).map(p => p.color);
-        let selectedColor = FACTION_INFO[selectedFaction].baseColor;
-        if (usedColors.includes(selectedColor)) {
-          // Find any available faction color
-          Object.values(Faction).some(faction => {
-            const color = FACTION_INFO[faction].baseColor;
-            if (!usedColors.includes(color)) {
-              selectedColor = color;
-              return true;
-            }
-            return false;
-          });
-        }
-        
-        // Add self to players WITHOUT changing the host
-        const player: Player = {
-          id: myId,
-          name: playerName,
-          isReady: false,
-          color: selectedColor,
-          faction: selectedFaction,
-          gold: 0,
-          units: 0,
-          goldRate: 1, // Base rate
-          unitRate: 0,
-          tiles: []
-        };
-        
-        // Keep track of the existing host
-        const host = existingLobbyState.host;
-        
-        // Add the new player to the lobby
-        existingLobbyState.players[myId] = player;
-        
-        // Update localStorage
-        lobbyData.lobbyState = existingLobbyState;
-        localStorage.setItem(storageKey, JSON.stringify(lobbyData));
-        
-        setLobbyState(existingLobbyState);
-        
-        // Broadcast that we've joined
-        const joinMessage: PeerMessage = {
-          type: 'JOIN_LOBBY',
-          payload: player,
-          senderId: myId
-        };
-        localStorage.setItem(`${storageKey}-lastMessage`, JSON.stringify(joinMessage));
+        setLobbyError('Lobby not found');
+        return;
       }
+      
+      // Parse the existing lobby data
+      const lobbyData = JSON.parse(existingData);
+      const existingLobbyState = lobbyData.lobbyState as LobbyState;
+      
+      if (Object.keys(existingLobbyState.players).length >= 3) {
+        setLobbyError('Lobby is full');
+        return;
+      }
+      
+      // Find an available faction
+      const usedFactions = Object.values(existingLobbyState.players).map(p => p.faction);
+      const availableFactions = Object.values(Faction).filter(f => !usedFactions.includes(f));
+      const selectedFaction = availableFactions.length > 0 ? availableFactions[0] : Faction.HUMANS;
+
+      // Find an available color
+      const usedColors = Object.values(existingLobbyState.players).map(p => p.color);
+      let selectedColor = FACTION_INFO[selectedFaction].baseColor;
+      if (usedColors.includes(selectedColor)) {
+        // Find any available faction color
+        Object.values(Faction).some(faction => {
+          const color = FACTION_INFO[faction].baseColor;
+          if (!usedColors.includes(color)) {
+            selectedColor = color;
+            return true;
+          }
+          return false;
+        });
+      }
+      
+      // Create our player object
+      const player: Player = {
+        id: myId,
+        name: playerName,
+        isReady: false,
+        color: selectedColor,
+        faction: selectedFaction,
+        gold: 0,
+        units: 0,
+        goldRate: 1, // Base rate
+        unitRate: 0,
+        tiles: []
+      };
+      
+      // Create a copy of the lobby state that includes our player
+      const updatedLobbyState = { ...existingLobbyState };
+      updatedLobbyState.players[myId] = player;
+      
+      // Explicitly preserve the original host
+      // This is crucial to prevent host changing when new players join
+      const originalHost = existingLobbyState.host;
+      updatedLobbyState.host = originalHost;
+      
+      // Update localStorage
+      lobbyData.lobbyState = updatedLobbyState;
+      lobbyData.lastUpdated = Date.now();
+      localStorage.setItem(storageKey, JSON.stringify(lobbyData));
+      
+      // Set our local state
+      setLobbyState(updatedLobbyState);
+      
+      // Send a join notification
+      const joinMessage: PeerMessage = {
+        type: 'JOIN_LOBBY',
+        payload: player,
+        senderId: myId
+      };
+      
+      // Use a unique key for this message to prevent conflicts
+      const messageKey = `${storageKey}-join-${myId}-${Date.now()}`;
+      localStorage.setItem(messageKey, JSON.stringify(joinMessage));
+      
+      // Start a periodic check for lobby updates (not as host)
+      const intervalId = setInterval(() => {
+        const latestData = localStorage.getItem(storageKey);
+        if (latestData) {
+          try {
+            const data = JSON.parse(latestData);
+            const latestLobbyState = data.lobbyState;
+            
+            if (JSON.stringify(latestLobbyState) !== JSON.stringify(lobbyState)) {
+              // Preserve our local player state
+              if (lobbyState && lobbyState.players[myId]) {
+                latestLobbyState.players[myId] = lobbyState.players[myId];
+              }
+              
+              setLobbyState(latestLobbyState);
+            }
+            
+            // Also update our player info in the shared state
+            if (lobbyState && lobbyState.players[myId]) {
+              data.lobbyState.players[myId] = lobbyState.players[myId];
+              localStorage.setItem(storageKey, JSON.stringify(data));
+            }
+          } catch (error) {
+            console.error('Error checking for lobby updates:', error);
+          }
+        }
+      }, 1000);
+      
+      // Store the interval ID for cleanup
+      lobbyCheckIntervals.current.set(lobbyId, intervalId);
+      
     } catch (error) {
       console.error('Error joining lobby:', error);
       setLobbyError('Failed to join lobby');
@@ -613,51 +689,14 @@ export const PeerProvider: React.FC<PeerProviderProps> = ({ children }) => {
     return true;
   };
 
-  // Reset the game
-  const resetGame = useCallback(() => {
-    setGameState(null);
-    
-    if (lobbyState) {
-      const updatedLobbyState = { ...lobbyState, gameStarted: false };
-      const updatedPlayers = { ...updatedLobbyState.players };
-      
-      // Reset all player ready states
-      Object.keys(updatedPlayers).forEach(id => {
-        updatedPlayers[id].isReady = false;
-        updatedPlayers[id].tiles = [];
-        updatedPlayers[id].gold = 0;
-        updatedPlayers[id].units = 0;
-        updatedPlayers[id].goldRate = 1;
-        updatedPlayers[id].unitRate = id === myId && updatedPlayers[id].faction === Faction.ALIENS ? 1 : 0;
-      });
-      
-      updatedLobbyState.players = updatedPlayers;
-      setLobbyState(updatedLobbyState);
-      
-      // Update localStorage (for testing)
-      const storageKey = `lobby-${lobbyState.lobbyId}`;
-      const existingData = localStorage.getItem(storageKey);
-      if (existingData) {
-        const lobbyData = JSON.parse(existingData);
-        lobbyData.lobbyState = updatedLobbyState;
-        lobbyData.gameState = null;
-        localStorage.setItem(storageKey, JSON.stringify(lobbyData));
-      }
-    }
-  }, [lobbyState, myId]);
-
-  // Mock function to broadcast messages to peers
-  // In a real app, this would use WebRTC data channels
+  // Move broadcastToPeers function here, above resetGame
   const broadcastToPeers = (message: PeerMessage) => {
     // For testing, update localStorage with a unique timestamp to avoid conflicts
     if (lobbyState) {
       const storageKey = `lobby-${lobbyState.lobbyId}`;
-      const messageKey = `${storageKey}-lastMessage`;
+      const messageKey = `${storageKey}-msg-${message.type}-${Date.now()}`;
       
-      // Remove any old messages first to prevent confusion
-      localStorage.removeItem(messageKey);
-      
-      // Add the new message
+      // Add the new message with a unique key
       localStorage.setItem(messageKey, JSON.stringify(message));
       
       // Also update the lobby/game state directly to ensure consistency
@@ -711,6 +750,47 @@ export const PeerProvider: React.FC<PeerProviderProps> = ({ children }) => {
       console.log('Would send to peer:', message);
     });
   };
+
+  // Reset the game
+  const resetGame = useCallback(() => {
+    setGameState(null);
+    
+    if (lobbyState) {
+      const lobbyId = lobbyState.lobbyId;
+      const updatedLobbyState = { ...lobbyState, gameStarted: false };
+      const updatedPlayers = { ...updatedLobbyState.players };
+      
+      // Reset all player ready states
+      Object.keys(updatedPlayers).forEach(id => {
+        updatedPlayers[id].isReady = false;
+        updatedPlayers[id].tiles = [];
+        updatedPlayers[id].gold = 0;
+        updatedPlayers[id].units = 0;
+        updatedPlayers[id].goldRate = 1;
+        updatedPlayers[id].unitRate = id === myId && updatedPlayers[id].faction === Faction.ALIENS ? 1 : 0;
+      });
+      
+      updatedLobbyState.players = updatedPlayers;
+      setLobbyState(updatedLobbyState);
+      
+      // Update localStorage (for testing)
+      const storageKey = `lobby-${lobbyId}`;
+      const existingData = localStorage.getItem(storageKey);
+      if (existingData) {
+        const lobbyData = JSON.parse(existingData);
+        lobbyData.lobbyState = updatedLobbyState;
+        lobbyData.gameState = null;
+        localStorage.setItem(storageKey, JSON.stringify(lobbyData));
+      }
+      
+      // Broadcast the reset to all peers
+      broadcastToPeers({
+        type: 'GAME_STATE',
+        payload: null,
+        senderId: myId
+      });
+    }
+  }, [lobbyState, myId]);
 
   // Mock function to handle incoming peer messages
   // In a real app, this would be called by WebRTC data channel event listeners
@@ -910,34 +990,46 @@ export const PeerProvider: React.FC<PeerProviderProps> = ({ children }) => {
   // Listen for localStorage changes from other tabs
   useEffect(() => {
     const handleStorageChange = (event: StorageEvent) => {
-      if (!event.key || !lobbyState) return;
+      if (!event.key || !event.newValue || !lobbyState) return;
       
       const storageKey = `lobby-${lobbyState.lobbyId}`;
-      const messageKey = `${storageKey}-lastMessage`;
       
-      // Handle new messages
-      if (event.key === messageKey && event.newValue) {
+      // Check if this is a message by checking the key pattern
+      if (event.key.startsWith(`${storageKey}-msg-`) || 
+          event.key.startsWith(`${storageKey}-join-`)) {
         try {
           const message = JSON.parse(event.newValue) as PeerMessage;
           if (message.senderId !== myId) {
             handlePeerMessage(message);
           }
         } catch (error) {
-          console.error('Error handling storage event:', error);
+          console.error('Error handling storage event message:', error);
         }
+        return;
       }
       
-      // Handle lobby state changes
-      if (event.key === storageKey && event.newValue) {
+      // Handle direct lobby state changes
+      if (event.key === storageKey) {
         try {
           const data = JSON.parse(event.newValue);
           
-          // Update lobby state
+          // Update lobby state if it exists and is different
           if (data.lobbyState && JSON.stringify(data.lobbyState) !== JSON.stringify(lobbyState)) {
-            // Preserve our local player state
+            // Don't change our ready state based on other tabs' updates
             if (lobbyState && lobbyState.players[myId] && data.lobbyState.players[myId]) {
-              data.lobbyState.players[myId] = lobbyState.players[myId];
+              data.lobbyState.players[myId] = {
+                ...data.lobbyState.players[myId],
+                isReady: lobbyState.players[myId].isReady
+              };
             }
+            
+            // Special handling for host: 
+            // - If we created the lobby, we should remain the host
+            // - Otherwise use the value from localStorage
+            if (heartbeatIntervals.current.has(lobbyState.lobbyId)) {
+              data.lobbyState.host = myId;
+            }
+            
             setLobbyState(data.lobbyState);
           }
           
