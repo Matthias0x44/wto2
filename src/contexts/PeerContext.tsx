@@ -134,10 +134,6 @@ export const PeerProvider: React.FC<PeerProviderProps> = ({ children }) => {
     setLobbyError(null);
     
     try {
-      // For now, we're mocking this - in a real app, we'd use a signaling server
-      // to exchange information with peers in the lobby
-      // This would be implemented with WebSocket or a similar technology
-      
       // For testing in local tabs, we'll use localStorage to simulate signaling
       const storageKey = `lobby-${lobbyId}`;
       const existingData = localStorage.getItem(storageKey);
@@ -200,7 +196,7 @@ export const PeerProvider: React.FC<PeerProviderProps> = ({ children }) => {
           });
         }
         
-        // Add self to players
+        // Add self to players WITHOUT changing the host
         const player: Player = {
           id: myId,
           name: playerName,
@@ -214,6 +210,10 @@ export const PeerProvider: React.FC<PeerProviderProps> = ({ children }) => {
           tiles: []
         };
         
+        // Keep track of the existing host
+        const host = existingLobbyState.host;
+        
+        // Add the new player to the lobby
         existingLobbyState.players[myId] = player;
         
         // Update localStorage
@@ -222,8 +222,13 @@ export const PeerProvider: React.FC<PeerProviderProps> = ({ children }) => {
         
         setLobbyState(existingLobbyState);
         
-        // In a real app, we'd establish WebRTC connections here
-        // For now, we're just using localStorage as a mock
+        // Broadcast that we've joined
+        const joinMessage: PeerMessage = {
+          type: 'JOIN_LOBBY',
+          payload: player,
+          senderId: myId
+        };
+        localStorage.setItem(`${storageKey}-lastMessage`, JSON.stringify(joinMessage));
       }
     } catch (error) {
       console.error('Error joining lobby:', error);
@@ -644,10 +649,60 @@ export const PeerProvider: React.FC<PeerProviderProps> = ({ children }) => {
   // Mock function to broadcast messages to peers
   // In a real app, this would use WebRTC data channels
   const broadcastToPeers = (message: PeerMessage) => {
-    // For testing, update localStorage
+    // For testing, update localStorage with a unique timestamp to avoid conflicts
     if (lobbyState) {
       const storageKey = `lobby-${lobbyState.lobbyId}`;
-      localStorage.setItem(`${storageKey}-lastMessage`, JSON.stringify(message));
+      const messageKey = `${storageKey}-lastMessage`;
+      
+      // Remove any old messages first to prevent confusion
+      localStorage.removeItem(messageKey);
+      
+      // Add the new message
+      localStorage.setItem(messageKey, JSON.stringify(message));
+      
+      // Also update the lobby/game state directly to ensure consistency
+      const existingData = localStorage.getItem(storageKey);
+      if (existingData) {
+        const lobbyData = JSON.parse(existingData);
+        
+        // Update the relevant state based on message type
+        switch (message.type) {
+          case 'READY_STATE':
+            if (typeof message.payload === 'boolean') {
+              if (lobbyData.lobbyState && lobbyData.lobbyState.players[message.senderId]) {
+                lobbyData.lobbyState.players[message.senderId].isReady = message.payload;
+              }
+            } else if (message.payload.faction && message.payload.color) {
+              if (lobbyData.lobbyState && lobbyData.lobbyState.players[message.senderId]) {
+                lobbyData.lobbyState.players[message.senderId].faction = message.payload.faction;
+                lobbyData.lobbyState.players[message.senderId].color = message.payload.color;
+              }
+            }
+            break;
+            
+          case 'START_GAME':
+            if (lobbyData.lobbyState) {
+              lobbyData.lobbyState.gameStarted = true;
+            }
+            lobbyData.gameState = message.payload;
+            break;
+            
+          case 'CLAIM_TILE':
+          case 'BUILD_CONSTRUCT':
+          case 'DEMOLISH_CONSTRUCT':
+            if (message.payload.gameState) {
+              lobbyData.gameState = message.payload.gameState;
+            }
+            break;
+            
+          case 'GAME_STATE':
+            lobbyData.gameState = message.payload;
+            break;
+        }
+        
+        // Save updated data back to localStorage
+        localStorage.setItem(storageKey, JSON.stringify(lobbyData));
+      }
     }
     
     // In a real WebRTC implementation, we'd send to all peers:
@@ -659,7 +714,7 @@ export const PeerProvider: React.FC<PeerProviderProps> = ({ children }) => {
 
   // Mock function to handle incoming peer messages
   // In a real app, this would be called by WebRTC data channel event listeners
-  const handlePeerMessage = (message: PeerMessage) => {
+  const handlePeerMessage = useCallback((message: PeerMessage) => {
     const { type, payload, senderId } = message;
     
     switch (type) {
@@ -668,6 +723,15 @@ export const PeerProvider: React.FC<PeerProviderProps> = ({ children }) => {
           const updatedLobbyState = { ...lobbyState };
           updatedLobbyState.players[senderId] = payload;
           setLobbyState(updatedLobbyState);
+          
+          // Update localStorage to reflect the new player
+          const storageKey = `lobby-${lobbyState.lobbyId}`;
+          const existingData = localStorage.getItem(storageKey);
+          if (existingData) {
+            const lobbyData = JSON.parse(existingData);
+            lobbyData.lobbyState = updatedLobbyState;
+            localStorage.setItem(storageKey, JSON.stringify(lobbyData));
+          }
         }
         break;
         
@@ -682,6 +746,15 @@ export const PeerProvider: React.FC<PeerProviderProps> = ({ children }) => {
               updatedLobbyState.players[senderId].color = payload.color;
             }
             setLobbyState(updatedLobbyState);
+            
+            // Update localStorage
+            const storageKey = `lobby-${lobbyState.lobbyId}`;
+            const existingData = localStorage.getItem(storageKey);
+            if (existingData) {
+              const lobbyData = JSON.parse(existingData);
+              lobbyData.lobbyState = updatedLobbyState;
+              localStorage.setItem(storageKey, JSON.stringify(lobbyData));
+            }
           }
         }
         break;
@@ -689,43 +762,68 @@ export const PeerProvider: React.FC<PeerProviderProps> = ({ children }) => {
       case 'START_GAME':
         setGameState(payload);
         if (lobbyState) {
-          setLobbyState({ ...lobbyState, gameStarted: true });
+          const updatedLobbyState = { ...lobbyState, gameStarted: true };
+          setLobbyState(updatedLobbyState);
+          
+          // Update localStorage
+          const storageKey = `lobby-${lobbyState.lobbyId}`;
+          const existingData = localStorage.getItem(storageKey);
+          if (existingData) {
+            const lobbyData = JSON.parse(existingData);
+            lobbyData.lobbyState = updatedLobbyState;
+            lobbyData.gameState = payload;
+            localStorage.setItem(storageKey, JSON.stringify(lobbyData));
+          }
         }
         break;
         
       case 'CLAIM_TILE':
-        if (payload.gameState) {
-          setGameState(payload.gameState);
-        }
-        break;
-        
       case 'BUILD_CONSTRUCT':
-        if (payload.gameState) {
-          setGameState(payload.gameState);
-        }
-        break;
-        
       case 'DEMOLISH_CONSTRUCT':
         if (payload.gameState) {
           setGameState(payload.gameState);
+          
+          // Update localStorage
+          if (lobbyState) {
+            const storageKey = `lobby-${lobbyState.lobbyId}`;
+            const existingData = localStorage.getItem(storageKey);
+            if (existingData) {
+              const lobbyData = JSON.parse(existingData);
+              lobbyData.gameState = payload.gameState;
+              localStorage.setItem(storageKey, JSON.stringify(lobbyData));
+            }
+          }
         }
         break;
         
       case 'GAME_STATE':
         setGameState(payload);
+        
+        // Update localStorage
+        if (lobbyState) {
+          const storageKey = `lobby-${lobbyState.lobbyId}`;
+          const existingData = localStorage.getItem(storageKey);
+          if (existingData) {
+            const lobbyData = JSON.parse(existingData);
+            lobbyData.gameState = payload;
+            localStorage.setItem(storageKey, JSON.stringify(lobbyData));
+          }
+        }
         break;
         
       default:
         console.log('Unknown message type:', type);
     }
-  };
+  }, [lobbyState, setGameState, setLobbyState]);
 
   // Set up a polling mechanism to check for new messages (for testing)
   useEffect(() => {
     if (!lobbyState) return;
     
-    const interval = setInterval(() => {
-      const storageKey = `lobby-${lobbyState.lobbyId}`;
+    const storageKey = `lobby-${lobbyState.lobbyId}`;
+    
+    const checkForUpdates = () => {
+      // Check for new messages
       const lastMessageKey = `${storageKey}-lastMessage`;
       const messageData = localStorage.getItem(lastMessageKey);
       
@@ -734,31 +832,131 @@ export const PeerProvider: React.FC<PeerProviderProps> = ({ children }) => {
           const message = JSON.parse(messageData) as PeerMessage;
           if (message.senderId !== myId) {
             handlePeerMessage(message);
+            
+            // Clear the message so we don't process it again
+            // But add a timestamp to make it unique to avoid race conditions
+            localStorage.setItem(
+              `${lastMessageKey}-processed-${Date.now()}`, 
+              messageData
+            );
+            localStorage.removeItem(lastMessageKey);
           }
         } catch (error) {
           console.error('Error parsing message:', error);
         }
       }
       
-      // Also check for lobby and game state updates
+      // Check for lobby and game state updates
       const lobbyData = localStorage.getItem(storageKey);
       if (lobbyData) {
         try {
           const data = JSON.parse(lobbyData);
-          if (data.lobbyState && JSON.stringify(data.lobbyState) !== JSON.stringify(lobbyState)) {
-            setLobbyState(data.lobbyState);
+          const storedLobbyState = data.lobbyState;
+          const storedGameState = data.gameState;
+          
+          // Update lobby state if it's different and we're not the ones who changed it
+          if (
+            storedLobbyState && 
+            JSON.stringify(storedLobbyState) !== JSON.stringify(lobbyState) &&
+            (
+              // If we've made a local change to the lobby state, don't overwrite it
+              !storedLobbyState.players[myId] || 
+              storedLobbyState.players[myId].isReady === lobbyState.players[myId]?.isReady
+            )
+          ) {
+            // Preserve our local player state
+            if (lobbyState && lobbyState.players[myId]) {
+              storedLobbyState.players[myId] = lobbyState.players[myId];
+            }
+            setLobbyState(storedLobbyState);
           }
-          if (data.gameState && JSON.stringify(data.gameState) !== JSON.stringify(gameState)) {
-            setGameState(data.gameState);
+          
+          // Update game state if it's different
+          if (
+            storedGameState && 
+            JSON.stringify(storedGameState) !== JSON.stringify(gameState)
+          ) {
+            // If both states exist, merge them carefully to avoid overwriting local changes
+            if (gameState) {
+              // If an important game action occurred, take the newer state
+              // For example, if a tile was claimed or a construct was built
+              const hasImportantChanges = 
+                JSON.stringify(storedGameState.grid) !== JSON.stringify(gameState.grid) ||
+                storedGameState.gameOver !== gameState.gameOver;
+                
+              if (hasImportantChanges) {
+                setGameState(storedGameState);
+              }
+            } else {
+              // If we don't have a game state yet, use the stored one
+              setGameState(storedGameState);
+            }
           }
         } catch (error) {
           console.error('Error parsing lobby data:', error);
         }
       }
-    }, 1000);
+    };
+    
+    // Check immediately
+    checkForUpdates();
+    
+    // Then check periodically
+    const interval = setInterval(checkForUpdates, 500); // Check more frequently (500ms)
     
     return () => clearInterval(interval);
-  }, [lobbyState, gameState, myId]);
+  }, [lobbyState, gameState, myId, handlePeerMessage]);
+
+  // Listen for localStorage changes from other tabs
+  useEffect(() => {
+    const handleStorageChange = (event: StorageEvent) => {
+      if (!event.key || !lobbyState) return;
+      
+      const storageKey = `lobby-${lobbyState.lobbyId}`;
+      const messageKey = `${storageKey}-lastMessage`;
+      
+      // Handle new messages
+      if (event.key === messageKey && event.newValue) {
+        try {
+          const message = JSON.parse(event.newValue) as PeerMessage;
+          if (message.senderId !== myId) {
+            handlePeerMessage(message);
+          }
+        } catch (error) {
+          console.error('Error handling storage event:', error);
+        }
+      }
+      
+      // Handle lobby state changes
+      if (event.key === storageKey && event.newValue) {
+        try {
+          const data = JSON.parse(event.newValue);
+          
+          // Update lobby state
+          if (data.lobbyState && JSON.stringify(data.lobbyState) !== JSON.stringify(lobbyState)) {
+            // Preserve our local player state
+            if (lobbyState && lobbyState.players[myId] && data.lobbyState.players[myId]) {
+              data.lobbyState.players[myId] = lobbyState.players[myId];
+            }
+            setLobbyState(data.lobbyState);
+          }
+          
+          // Update game state
+          if (data.gameState && JSON.stringify(data.gameState) !== JSON.stringify(gameState)) {
+            setGameState(data.gameState);
+          }
+        } catch (error) {
+          console.error('Error handling lobby state change:', error);
+        }
+      }
+    };
+    
+    window.addEventListener('storage', handleStorageChange);
+    
+    return () => {
+      window.removeEventListener('storage', handleStorageChange);
+    };
+  }, [myId, lobbyState, gameState, handlePeerMessage]);
 
   return (
     <PeerContext.Provider
