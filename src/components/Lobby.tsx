@@ -1,7 +1,7 @@
-import React from 'react';
+import React, { useState } from 'react';
 import styled from 'styled-components';
 import { usePeer } from '../contexts/PeerContext';
-import { MAX_PLAYERS } from '../types';
+import { MAX_PLAYERS, Faction, FACTION_INFO } from '../types';
 
 const Container = styled.div`
   display: flex;
@@ -73,6 +73,17 @@ const PlayerName = styled.div<{ color: string }>`
   }
 `;
 
+const PlayerDetails = styled.div`
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+`;
+
+const FactionName = styled.div`
+  font-size: 0.8rem;
+  opacity: 0.8;
+`;
+
 const HostBadge = styled.span`
   background-color: #ffd700;
   color: #282c34;
@@ -123,14 +134,81 @@ const Button = styled.button<{ primary?: boolean }>`
   }
 `;
 
+const FactionSelectionContainer = styled.div`
+  margin-bottom: 2rem;
+`;
+
+const FactionSelectionTitle = styled.h3`
+  margin-bottom: 1rem;
+`;
+
+const FactionGrid = styled.div`
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 1rem;
+  margin-bottom: 1.5rem;
+`;
+
+const FactionCard = styled.div<{ selected: boolean, color: string }>`
+  background-color: #444a57;
+  border: 2px solid ${props => props.selected ? props.color : 'transparent'};
+  border-radius: 8px;
+  padding: 1rem;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  
+  &:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 8px rgba(0, 0, 0, 0.3);
+  }
+`;
+
+const FactionHeader = styled.div`
+  display: flex;
+  align-items: center;
+  margin-bottom: 0.5rem;
+`;
+
+const FactionIcon = styled.div<{ color: string }>`
+  width: 1.5rem;
+  height: 1.5rem;
+  border-radius: 50%;
+  background-color: ${props => props.color};
+  margin-right: 0.75rem;
+`;
+
+const FactionTitle = styled.h4`
+  margin: 0;
+`;
+
+const FactionDescription = styled.p`
+  font-size: 0.8rem;
+  margin: 0.5rem 0 0;
+  opacity: 0.8;
+`;
+
+const ConstructsList = styled.div`
+  font-size: 0.8rem;
+  margin-top: 0.5rem;
+`;
+
+const Construct = styled.div`
+  display: flex;
+  justify-content: space-between;
+  opacity: 0.8;
+`;
+
 const Lobby: React.FC = () => {
   const { 
     myId, 
     lobbyState, 
-    toggleReady, 
-    startGame, 
-    resetGame 
+    toggleReady,
+    changeFaction,
+    startGame,
+    resetGame
   } = usePeer();
+  
+  const [selectedFaction, setSelectedFaction] = useState<Faction | null>(null);
   
   if (!lobbyState) {
     return <div>Loading...</div>;
@@ -142,9 +220,16 @@ const Lobby: React.FC = () => {
   const allPlayersReady = players.every(player => player.isReady);
   const canStartGame = allPlayersReady && players.length >= 2;
   
+  const handleFactionSelect = (faction: Faction) => {
+    if (myPlayer.isReady) return; // Can't change faction when ready
+    
+    setSelectedFaction(faction);
+    changeFaction(faction);
+  };
+  
   return (
     <Container>
-      <Title>Game Lobby</Title>
+      <Title>Wartiles Online - Lobby</Title>
       
       <LobbyCode>
         Lobby Code: <span>{lobbyState.lobbyId}</span>
@@ -157,10 +242,15 @@ const Lobby: React.FC = () => {
           {players.map(player => (
             <PlayerItem key={player.id}>
               <PlayerName color={player.color}>
-                {player.name}
-                {player.id === lobbyState.host && (
-                  <HostBadge>HOST</HostBadge>
-                )}
+                <PlayerDetails>
+                  {player.name}
+                  {player.id === lobbyState.host && (
+                    <HostBadge>HOST</HostBadge>
+                  )}
+                  {player.faction && (
+                    <FactionName>{FACTION_INFO[player.faction].name}</FactionName>
+                  )}
+                </PlayerDetails>
               </PlayerName>
               <ReadyStatus isReady={player.isReady}>
                 {player.isReady ? 'Ready' : 'Not Ready'}
@@ -175,6 +265,44 @@ const Lobby: React.FC = () => {
           ))}
         </PlayerList>
         
+        {!myPlayer.isReady && (
+          <FactionSelectionContainer>
+            <FactionSelectionTitle>Choose Your Faction</FactionSelectionTitle>
+            <FactionGrid>
+              {Object.values(Faction).map(faction => (
+                <FactionCard 
+                  key={faction}
+                  selected={myPlayer.faction === faction}
+                  color={FACTION_INFO[faction].baseColor}
+                  onClick={() => handleFactionSelect(faction)}
+                >
+                  <FactionHeader>
+                    <FactionIcon color={FACTION_INFO[faction].baseColor} />
+                    <FactionTitle>{FACTION_INFO[faction].name}</FactionTitle>
+                  </FactionHeader>
+                  <FactionDescription>
+                    {FACTION_INFO[faction].description}
+                  </FactionDescription>
+                  <ConstructsList>
+                    <Construct>
+                      <span>G:</span>
+                      <span>{FACTION_INFO[faction].constructs.GOLD}</span>
+                    </Construct>
+                    <Construct>
+                      <span>U:</span>
+                      <span>{FACTION_INFO[faction].constructs.UNIT}</span>
+                    </Construct>
+                    <Construct>
+                      <span>D:</span>
+                      <span>{FACTION_INFO[faction].constructs.DEFENSE}</span>
+                    </Construct>
+                  </ConstructsList>
+                </FactionCard>
+              ))}
+            </FactionGrid>
+          </FactionSelectionContainer>
+        )}
+        
         {players.length < 2 && (
           <WaitingMessage>
             Waiting for more players to join...
@@ -187,7 +315,7 @@ const Lobby: React.FC = () => {
           </Button>
         )}
         
-        <Button onClick={toggleReady}>
+        <Button onClick={toggleReady} disabled={!myPlayer.faction && !myPlayer.isReady}>
           {myPlayer.isReady ? 'Not Ready' : 'Ready Up'}
         </Button>
       </Card>
